@@ -10,6 +10,10 @@
 #include <vector>
 #include <string>
 #include <cstring>
+#include <unordered_map>
+#include <mutex>
+#include <thread>
+#include <future>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -27,10 +31,11 @@
 
 namespace duckdb {
 
+// Global DNS cache with thread safety
+static std::unordered_map<std::string, std::string> dns_cache;
+static std::mutex cache_mutex;
 
-std::string dns_cname_lookup(const std::string& hostname) {
-    res_init();  // ensure resolver is initialized
-
+std::string dns_cname_lookup_uncached(const std::string& hostname) {
     unsigned char answer[4096];
     int len = res_query(hostname.c_str(), C_IN, T_CNAME, answer, sizeof(answer));
     if (len <= 0)
@@ -55,14 +60,78 @@ std::string dns_cname_lookup(const std::string& hostname) {
     return {};
 }
 
+std::string dns_cname_lookup(const std::string& hostname) {
+    // Check cache first
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        auto it = dns_cache.find(hostname);
+        if (it != dns_cache.end()) {
+            return it->second;
+        }
+    }
+
+    // Cache miss - perform actual lookup
+    std::string result = dns_cname_lookup_uncached(hostname);
+
+    // Store in cache
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        dns_cache[hostname] = result;
+    }
+
+    return result;
+}
+
 inline void DnsCnameLookupScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &hostname_vector = args.data[0];
+	auto count = args.size();
 
+	// Collect unique hostnames that need DNS lookups
+	std::vector<std::string> unique_hostnames;
+	std::unordered_map<std::string, idx_t> hostname_to_index;
+
+	{
+		std::lock_guard<std::mutex> lock(cache_mutex);
+		for (idx_t i = 0; i < count; i++) {
+			auto hostname = hostname_vector.GetValue(i).ToString();
+			if (dns_cache.find(hostname) == dns_cache.end() &&
+				hostname_to_index.find(hostname) == hostname_to_index.end()) {
+				hostname_to_index[hostname] = unique_hostnames.size();
+				unique_hostnames.push_back(hostname);
+			}
+		}
+	}
+
+	// Perform parallel DNS lookups for uncached hostnames
+	std::vector<std::future<std::string>> futures;
+	const size_t max_threads = std::min((size_t)8, unique_hostnames.size());
+
+	for (size_t i = 0; i < unique_hostnames.size(); i += max_threads) {
+		futures.clear();
+
+		// Start up to max_threads parallel lookups
+		for (size_t j = 0; j < max_threads && (i + j) < unique_hostnames.size(); j++) {
+			const auto& hostname = unique_hostnames[i + j];
+			futures.push_back(std::async(std::launch::async, dns_cname_lookup_uncached, hostname));
+		}
+
+		// Collect results and update cache
+		{
+			std::lock_guard<std::mutex> lock(cache_mutex);
+			for (size_t j = 0; j < futures.size(); j++) {
+				const auto& hostname = unique_hostnames[i + j];
+				dns_cache[hostname] = futures[j].get();
+			}
+		}
+	}
+
+	// Now process all results using cached values
 	UnaryExecutor::Execute<string_t, string_t>(
-		hostname_vector, result, args.size(),
+		hostname_vector, result, count,
 		[&](string_t hostname) {
-			auto cname_result = dns_cname_lookup(hostname.GetString());
-			return StringVector::AddString(result, cname_result);
+			std::lock_guard<std::mutex> lock(cache_mutex);
+			auto it = dns_cache.find(hostname.GetString());
+			return StringVector::AddString(result, it != dns_cache.end() ? it->second : "");
 		});
 }
 
