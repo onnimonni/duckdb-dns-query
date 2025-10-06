@@ -1,23 +1,30 @@
 # name: test/sql/quack.test
-# description: test quack extension
+# description: test dns_query extension
 # group: [sql]
 
 # Before we load the extension, this will fail
 statement error
-SELECT quack('Sam');
+SELECT dns_cname_lookup('flights.google.com');
 ----
-Catalog Error: Scalar Function with name quack does not exist!
+Catalog Error: Scalar Function with name dns_cname_lookup does not exist!
 
 # Require statement will ensure this test is run with this extension loaded
-require quack
+require dns_query
 
-# Confirm the extension works
+# Test CNAME record lookup for flights.google.com with real DNS
 query I
-SELECT quack('Sam');
+SELECT dns_cname_lookup('flights.google.com') as cname;
 ----
-Quack Sam 🐥
+www3.l.google.com
 
+# Top level domains don't support CNAME so test it returns empty string
 query I
-SELECT quack_openssl_version('Michael') ILIKE 'Quack Michael, my linked OpenSSL version is OpenSSL%';
+SELECT dns_cname_lookup('google.com');
 ----
-true
+(empty)
+
+# Test that invalid domain returns empty string
+query I
+SELECT dns_cname_lookup('this-domain-definitely-does-not-exist-12345.com');
+----
+(empty)

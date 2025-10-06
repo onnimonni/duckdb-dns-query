@@ -1,6 +1,7 @@
 {
         "dependencies": [
-                "openssl"
+                "openssl",
+                "c-ares"
         ],
         "vcpkg-configuration": {
                 "overlay-ports": [
