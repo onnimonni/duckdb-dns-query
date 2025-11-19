@@ -1,3 +1,5 @@
+# Archived. Use https://github.com/tobilg/duckdb-dns instead of this
+
 # DuckDB DNS CNAME extension
 
 **THIS IS VERY EXPERIMENTAL AND CREATED WITH AI ASSISTANCE**
